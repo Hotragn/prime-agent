@@ -362,6 +362,7 @@ describe("createAgentSessionFromServices", () => {
 					messageCount: 0,
 					queuedCount: 0,
 					isSessionActive: false,
+					pendingToolCallCount: 0,
 				},
 				agents: [],
 			}),
