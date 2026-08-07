@@ -4370,6 +4370,7 @@ export class AgentSession {
 			rlmParentAgent: this._rlmParentAgent,
 			harnessState: this._loadMergedHarnessState(),
 			genericMcpServers: this._mcpManager?.getEnabledGenericServers(),
+			harnessOverview: this.settingsManager.getHarnessOverviewSettings(),
 		};
 		return buildSystemPrompt(this._baseSystemPromptOptions);
 	}
