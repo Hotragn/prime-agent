@@ -796,7 +796,7 @@ pub(crate) fn parse_iso_millis(text: &str) -> Option<u64> {
     let days = era * 146_097 + doe - 719_468;
     let (time, offset_ms) = parse_time_with_offset(time)?;
     let millis = days * 24 * 60 * 60 * 1000 + time - offset_ms;
-    Some(millis as u64)
+    u64::try_from(millis).ok()
 }
 
 /// Time-of-day parse: HH:MM[:SS[.fff]][Z|(+/-HH:MM)] -> millis + offset.
@@ -805,7 +805,7 @@ fn parse_time_with_offset(time: &str) -> Option<(i64, i64)> {
         (stripped, 0i64)
     } else if let Some(index) = time
         .rfind('+')
-        .or_else(|| time[1..].rfind('-').map(|i| i + 1))
+        .or_else(|| time.get(1..)?.rfind('-').map(|i| i + 1))
     {
         let offset = parse_offset(&time[index..])?;
         (&time[..index], offset)
@@ -897,6 +897,23 @@ mod tests {
         assert!(parse_agent_cron_schedule("at 1999-01-01T00:00:00Z", BASE).is_err());
         let (schedule, _) = parse_agent_cron_schedule("'in 10m'", BASE).unwrap();
         assert_eq!(schedule.expression, "in 10m");
+    }
+
+    #[test]
+    fn malformed_and_pre_epoch_one_shot_times_are_rejected() {
+        for text in [
+            "at 2100-01-01T",
+            "at 2100-01-01T\u{e9}",
+            "at 1969-12-31T00:00:00Z",
+        ] {
+            assert_eq!(
+                parse_agent_cron_schedule(text, BASE)
+                    .unwrap_err()
+                    .to_string(),
+                "Invalid one-shot schedule. Use: at <ISO date>",
+                "{text}"
+            );
+        }
     }
 
     #[test]
