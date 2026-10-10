@@ -57,14 +57,14 @@ pub fn overview_for_prompt(state: &HarnessState) -> String {
             let arguments_text =
                 if entry.kind == RefinementKind::Skill && !entry.arguments.is_empty() {
                     let serialized = serde_json::to_string(&entry.arguments).unwrap_or_default();
-                    format!(" args={}", &serialized[..serialized.len().min(240)])
+                    format!(" args={}", serialized.chars().take(240).collect::<String>())
                 } else {
                     String::new()
                 };
             let reference_text =
                 if entry.kind == RefinementKind::Skill && !entry.reference.is_empty() {
                     let serialized = serde_json::to_string(&entry.reference).unwrap_or_default();
-                    format!(" ref={}", &serialized[..serialized.len().min(240)])
+                    format!(" ref={}", serialized.chars().take(240).collect::<String>())
                 } else {
                     String::new()
                 };
@@ -518,6 +518,43 @@ mod tests {
         assert!(overview.contains("memory: 1"));
         assert!(overview.contains("- [local:m1] Fact (/m/m1, v0): builds are green"));
         assert_eq!(history_for_prompt(&[]), "No prior refinement history.");
+    }
+
+    #[test]
+    fn a_skill_overview_clips_non_ascii_arguments_by_chars() {
+        let mut state = super::super::empty_harness_state();
+        // `{"a":"` is 6 bytes, so byte 240 lands inside the first em dash.
+        let value = format!("{}\u{2014}\u{2014}", "x".repeat(233));
+        let mut arguments = serde_json::Map::default();
+        arguments.insert("a".to_string(), serde_json::Value::String(value));
+        state
+            .entries
+            .get_mut(&RefinementKind::Skill)
+            .unwrap()
+            .insert(
+                "s1".to_string(),
+                super::super::HarnessEntry {
+                    id: "s1".to_string(),
+                    kind: RefinementKind::Skill,
+                    title: "Skill".to_string(),
+                    content: "runs it".to_string(),
+                    path: "/s/s1".to_string(),
+                    scope: None,
+                    reference: arguments.clone(),
+                    arguments,
+                    metadata: serde_json::Map::default(),
+                    source: "test".to_string(),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                    version: 0,
+                },
+            );
+        let overview = overview_for_prompt(&state);
+        // 240 chars: the 6-char head, the 233 x's, and the first em dash.
+        let snippet = format!("{{\"a\":\"{}\u{2014}", "x".repeat(233));
+        assert!(overview.contains(&format!(
+            "- [global:s1] Skill (/s/s1, v0) ref={snippet} args={snippet}: runs it"
+        )));
     }
 
     #[tokio::test]
