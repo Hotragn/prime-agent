@@ -273,7 +273,9 @@ impl AuthStorageBackend for InMemoryAuthStorageBackend {
 ///
 /// Returns an error when the content is not valid JSON or its root is not a JSON object.
 pub fn parse_storage_data(content: Option<&str>) -> Result<AuthStorageData> {
-    let content = content.filter(|content| !content.is_empty());
+    let content = content
+        .map(|content| content.trim_start_matches('\u{feff}'))
+        .filter(|content| !content.is_empty());
     let Some(content) = content else {
         return Ok(AuthStorageData::default());
     };
@@ -331,6 +333,15 @@ mod tests {
             fs::read_to_string(dir.path().join("auth.json")).unwrap(),
             document
         );
+    }
+
+    #[test]
+    fn parse_accepts_a_bom_prefixed_document() {
+        let data = parse_storage_data(Some(
+            "\u{feff}{\"anthropic\":{\"type\":\"api_key\",\"key\":\"k\"}}",
+        ))
+        .unwrap();
+        assert_eq!(data.keys(), vec!["anthropic".to_string()]);
     }
 
     #[test]

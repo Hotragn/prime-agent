@@ -172,6 +172,16 @@ struct CachedRead {
 /// for [`FileSettingsStorage::read`]; a stale stat identity simply misses and re-reads.
 static READ_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRead>>> = OnceLock::new();
 
+/// A settings file's text without a leading UTF-8 BOM (Windows editors add
+/// one); both the load and the merge-on-write parse what this returns.
+fn read_settings_file(path: &Path) -> std::io::Result<String> {
+    let content = fs::read_to_string(path)?;
+    Ok(match content.strip_prefix('\u{feff}') {
+        Some(rest) => rest.to_string(),
+        None => content,
+    })
+}
+
 fn read_cache() -> &'static Mutex<HashMap<PathBuf, CachedRead>> {
     READ_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -202,7 +212,7 @@ impl SettingsStorage for FileSettingsStorage {
             }
         }
         let guard = Self::acquire_lock(path)?;
-        let content = fs::read_to_string(path)?;
+        let content = read_settings_file(path)?;
         drop(guard);
         read_cache()
             .lock()
@@ -230,7 +240,7 @@ impl SettingsStorage for FileSettingsStorage {
             held = Some(Self::acquire_lock(path)?);
         }
         let current = if file_exists {
-            Some(fs::read_to_string(path)?)
+            Some(read_settings_file(path)?)
         } else {
             None
         };
@@ -245,7 +255,7 @@ impl SettingsStorage for FileSettingsStorage {
                 held = Some(Self::acquire_lock(path)?);
                 // A racing first writer may have landed since the unlocked read.
                 if path.exists() {
-                    next = update(Some(fs::read_to_string(path)?));
+                    next = update(Some(read_settings_file(path)?));
                 }
             }
             if let Some(content) = next {
@@ -348,6 +358,31 @@ mod tests {
         storage
             .with_lock(SettingsScope::Global, &mut |current| {
                 assert!(current.unwrap().contains("prime"));
+                None
+            })
+            .unwrap();
+    }
+
+    /// A BOM-prefixed file (Notepad's UTF-8) reads without the BOM on both
+    /// arms, so the load and the merge-on-write both parse it.
+    #[test]
+    fn a_bom_prefixed_settings_file_reads_without_the_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = FileSettingsStorage::new(dir.path().join("cwd"), dir.path().join("agent"));
+        fs::create_dir_all(dir.path().join("agent")).unwrap();
+        let document = r#"{ "theme": "light" }"#;
+        fs::write(
+            dir.path().join("agent/settings.json"),
+            format!("\u{feff}{document}"),
+        )
+        .unwrap();
+        assert_eq!(
+            storage.read(SettingsScope::Global).unwrap().as_deref(),
+            Some(document)
+        );
+        storage
+            .with_lock(SettingsScope::Global, &mut |current| {
+                assert_eq!(current.as_deref(), Some(document));
                 None
             })
             .unwrap();

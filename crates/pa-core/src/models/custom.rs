@@ -173,7 +173,7 @@ pub struct ProviderOverride {
 ///
 /// Human-readable error when the document is not valid JSON after stripping.
 pub fn parse_models_config(content: &str) -> Result<ModelsConfig, String> {
-    let stripped = strip_json_comments(content);
+    let stripped = strip_json_comments(content.trim_start_matches('\u{feff}'));
     serde_json::from_str(&stripped).map_err(|error| format!("Invalid models.json: {error}"))
 }
 
@@ -472,6 +472,11 @@ mod tests {
         let stripped = strip_json_comments(input);
         let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
         assert!(parsed["providers"]["ollama"]["baseUrl"].is_string());
+    }
+
+    #[test]
+    fn parses_a_bom_prefixed_document() {
+        assert!(parse_models_config("\u{feff}{ \"providers\": {} }").is_ok());
     }
 
     #[test]
