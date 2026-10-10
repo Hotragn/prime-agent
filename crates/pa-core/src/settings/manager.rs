@@ -37,6 +37,10 @@ pub struct SettingsManager {
     /// Load failures per scope; a scope whose file failed to parse is never written back.
     global_load_error: Option<String>,
     project_load_error: Option<String>,
+    /// The global settings as last loaded or written: a save writes only the
+    /// top-level keys that differ from it (TS `modifiedFields`), so keys
+    /// another process wrote since are kept.
+    global_baseline: serde_json::Map<String, serde_json::Value>,
 }
 
 impl SettingsManager {
@@ -47,6 +51,7 @@ impl SettingsManager {
         let (project, _, project_load_error) =
             load_scope(storage.as_ref(), SettingsScope::Project, &mut errors);
         let merged = deep_merge(&global, &project);
+        let global_baseline = settings_object(&global);
         Self {
             storage,
             global,
@@ -57,6 +62,7 @@ impl SettingsManager {
             errors,
             global_load_error,
             project_load_error,
+            global_baseline,
         }
     }
 
@@ -139,6 +145,7 @@ impl SettingsManager {
             load_scope(self.storage.as_ref(), SettingsScope::Global, &mut errors);
         let (project, _, project_load_error) =
             load_scope(self.storage.as_ref(), SettingsScope::Project, &mut errors);
+        self.global_baseline = settings_object(&global);
         self.global = global;
         self.project = project;
         self.global_raw = global_raw;
@@ -538,11 +545,17 @@ impl SettingsManager {
             map.insert(field.to_string(), value.clone());
             serde_json::to_string_pretty(&serde_json::Value::Object(map)).ok()
         });
-        if let Err(error) = result {
-            self.errors.push(SettingsError {
+        match result {
+            Ok(()) => {
+                if scope == SettingsScope::Global {
+                    self.global_baseline
+                        .insert(field.to_string(), value.clone());
+                }
+            }
+            Err(error) => self.errors.push(SettingsError {
                 scope,
                 message: error.to_string(),
-            });
+            }),
         }
     }
 
@@ -893,13 +906,43 @@ impl SettingsManager {
     /// Write the global scope back (project scope is host-written, not
     /// user-set), then re-derive the effective settings.
     fn save_global(&mut self) -> Result<()> {
-        let content = serde_json::to_string_pretty(&self.global)?;
+        self.merged = deep_merge(&self.global, &self.project);
+        if let Some(message) = &self.global_load_error {
+            self.errors.push(SettingsError {
+                scope: SettingsScope::Global,
+                message: format!(
+                    "Global settings not saved: settings file failed to parse: {message}"
+                ),
+            });
+            return Ok(());
+        }
+        let next = settings_object(&self.global);
+        let changed: Vec<(&String, &serde_json::Value)> = next
+            .iter()
+            .filter(|(key, value)| self.global_baseline.get(*key) != Some(*value))
+            .collect();
         self.storage
             .with_lock(SettingsScope::Global, &mut |current| {
-                let _ = current;
-                Some(content.clone())
+                let mut map: serde_json::Map<String, serde_json::Value> = current
+                    .and_then(|content| serde_json::from_str::<serde_json::Value>(&content).ok())
+                    .and_then(|value| match value {
+                        serde_json::Value::Object(mut map) => {
+                            super::merge::migrate(&mut map);
+                            Some(map)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                for (key, value) in &changed {
+                    if value.is_null() {
+                        map.remove(*key);
+                    } else {
+                        map.insert((*key).clone(), (*value).clone());
+                    }
+                }
+                serde_json::to_string_pretty(&serde_json::Value::Object(map)).ok()
             })?;
-        self.merged = deep_merge(&self.global, &self.project);
+        self.global_baseline = next;
         Ok(())
     }
 }
@@ -916,6 +959,14 @@ pub enum IdleEviction {
 pub struct SessionArchivePolicy {
     pub max_age_days: Option<u64>,
     pub max_sessions: Option<usize>,
+}
+
+/// One scope's settings as a JSON object (unset fields serialize as null).
+fn settings_object(settings: &Settings) -> serde_json::Map<String, serde_json::Value> {
+    match serde_json::to_value(settings) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    }
 }
 
 fn strings(array: &[serde_json::Value]) -> Vec<String> {
@@ -1037,6 +1088,50 @@ mod tests {
             .set_factory_enabled(false)
             .expect("set factory disabled");
         assert!(!manager.get_factory_enabled());
+    }
+
+    /// A global file that failed to parse is never replaced by a save (TS
+    /// `save` records "Global settings not saved" and keeps the file).
+    #[test]
+    fn a_global_file_that_failed_to_parse_is_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let path = agent_dir.join("settings.json");
+        let original = r#"{ "theme": "light", "quietStartup": true, }"#;
+        std::fs::write(&path, original).unwrap();
+
+        let mut manager = SettingsManager::create(dir.path(), &agent_dir);
+        manager
+            .set_default_model_and_provider("anthropic", "claude-x")
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(manager
+            .errors()
+            .iter()
+            .any(|error| error.message.starts_with("Global settings not saved")));
+        assert_eq!(manager.get_default_model(), Some("claude-x"));
+    }
+
+    /// A save writes only the keys this manager changed into the file on
+    /// disk: a key another process wrote after this manager loaded survives.
+    #[test]
+    fn a_global_save_keeps_keys_written_by_another_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let path = agent_dir.join("settings.json");
+        std::fs::write(&path, r#"{ "theme": "light" }"#).unwrap();
+
+        let mut manager = SettingsManager::create(dir.path(), &agent_dir);
+        std::fs::write(&path, r#"{ "theme": "light", "quietStartup": true }"#).unwrap();
+        manager.set_theme("dark".to_string()).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!({ "theme": "dark", "quietStartup": true })
+        );
     }
 
     #[test]
