@@ -186,7 +186,7 @@ impl AuthPanel {
                         theme,
                         width,
                         &"\u{2022}".repeat(field.value().chars().count()),
-                        field.value().chars().count(),
+                        field.cursor(),
                         true,
                         placeholder,
                     )),

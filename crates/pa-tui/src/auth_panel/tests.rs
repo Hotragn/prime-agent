@@ -209,6 +209,49 @@ fn an_empty_paste_submit_shows_the_notice_only_on_the_token_panel() {
 }
 
 #[test]
+fn the_masked_field_draws_the_caret_where_the_edit_lands() {
+    let mut panel = AuthPanel::new("Connect GitHub");
+    let (reply, _answer) = oneshot::channel();
+    panel.mount_paste(
+        "Paste the token for github:",
+        PastePromptTone::Text,
+        PasteStyle::Masked,
+        false,
+        reply,
+    );
+    for key in ["a", "b", "c", "left", "left"] {
+        panel.handle_key(key, &kb(), &mut sink());
+    }
+    let rows = panel.render(&theme(), 90, &kb());
+    let field = rows
+        .iter()
+        .find_map(|row| {
+            let caret = row.iter().position(|span| {
+                span.style
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::REVERSED)
+            })?;
+            let text = |spans: &[Span]| -> String {
+                spans.iter().map(|span| span.content.as_str()).collect()
+            };
+            Some((
+                text(&row[..caret]),
+                text(&row[caret..=caret]),
+                text(&row[caret + 1..]).trim_end().to_string(),
+            ))
+        })
+        .expect("the focused field draws a caret");
+    assert_eq!(
+        field,
+        (
+            " \u{2022}".to_string(),
+            "\u{2022}".to_string(),
+            "\u{2022}".to_string()
+        )
+    );
+}
+
+#[test]
 fn cancel_runs_through_the_effective_binding() {
     let (mut panel, mut answer) = mount_paste();
     panel.handle_key("ctrl+c", &kb(), &mut sink());
