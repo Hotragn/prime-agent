@@ -229,7 +229,12 @@ pub async fn run_installer_from(
     let result = execute_script(&handle, &[], prefix, channel, output).await;
     let _ = std::fs::remove_file(&script);
     result?;
-    let version = launcher_version(prefix).await;
+    // A stable or beta launcher answers a bare version the probe skips; the
+    // marker the script just published records it.
+    let version = match launcher_version(prefix).await {
+        Some(version) => Some(version),
+        None => installed_version(prefix),
+    };
     Ok(Installed { version })
 }
 
@@ -1085,6 +1090,18 @@ chmod 0755 "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent-rust"
 echo "installed: 9.9.8-continuous.fedcba9876543210"
 "#;
 
+    /// A stable release: the launcher answers the bare version (stable builds
+    /// carry no `-continuous.<commit>` stamp) and the marker records it.
+    /// Unix only: same sh-script class as [`MOCK_INSTALLER`].
+    #[cfg(unix)]
+    const STABLE_INSTALLER: &str = r#"#!/bin/sh
+set -eu
+mkdir -p "${PRIME_AGENT_RUST_PREFIX}/bin" "${PRIME_AGENT_RUST_PREFIX}/share/prime-agent"
+printf '#!/bin/sh\necho "0.10.0"\n' > "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent"
+chmod 0755 "${PRIME_AGENT_RUST_PREFIX}/bin/prime-agent"
+printf 'install-rust.sh channel stable\nversion 0.10.0\n' > "${PRIME_AGENT_RUST_PREFIX}/share/prime-agent/.prime-agent-install"
+"#;
+
     fn sandbox() -> (tempfile::TempDir, Preserve, PathBuf) {
         let root = tempfile::tempdir().expect("sandbox root");
         let preserve = Preserve::new(root.path());
@@ -1264,6 +1281,22 @@ echo "installed: 9.9.8-continuous.fedcba9876543210"
             Some("9.9.8-continuous.fedcba9876543210"),
             "the pre-takeover launcher answers through the probe"
         );
+        drop(root);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_stable_update_reports_the_installed_version() {
+        let (root, _preserve, prefix) = sandbox();
+        let installed = run_installer_from(
+            &serve(STABLE_INSTALLER),
+            &prefix,
+            None,
+            InstallerOutput::Capture,
+        )
+        .await
+        .expect("the funnel installs the stable build");
+        assert_eq!(installed.version.as_deref(), Some("0.10.0"));
         drop(root);
     }
 
