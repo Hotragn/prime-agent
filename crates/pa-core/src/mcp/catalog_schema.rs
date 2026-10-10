@@ -300,10 +300,9 @@ pub enum OauthKind {
 /// A bounded echo of an entry id in errors: never reprint untrusted long
 /// (possibly secret-ish) input.
 fn safe_entry_id(entry_id: &str) -> String {
-    if entry_id.len() > 64 {
-        format!("{}\u{2026}", &entry_id[..64])
-    } else {
-        entry_id.to_string()
+    match entry_id.char_indices().nth(64) {
+        Some((end, _)) => format!("{}\u{2026}", &entry_id[..end]),
+        None => entry_id.to_string(),
     }
 }
 
@@ -568,6 +567,17 @@ mod tests {
 
     fn parse(bytes: &[u8]) -> PluginsCatalog {
         parse_plugins_catalog(bytes).expect("catalog parses")
+    }
+
+    /// The id echo clips by chars: `validate` echoes the raw id before the
+    /// pattern check rejects it, so a long non-ASCII id must not panic.
+    #[test]
+    fn a_long_non_ascii_entry_id_is_clipped_by_chars() {
+        let id = format!("a{}", "\u{e9}".repeat(70));
+        assert_eq!(
+            safe_entry_id(&id),
+            format!("a{}\u{2026}", "\u{e9}".repeat(63))
+        );
     }
 
     /// Parity gate: the real 68-service payload parses with zero failures.
