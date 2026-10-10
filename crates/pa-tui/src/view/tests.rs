@@ -69,6 +69,14 @@ fn a_paste_never_reaches_the_editor_behind_an_overlay() {
     v.reload_box = Some("reloading".to_string());
     assert!(v.route_paste("never"));
     assert_eq!(editor_text(&v), "");
+    // The factory page is input-less too: its frame owns the paste.
+    let mut v = view();
+    v.factory_view = Some(crate::factory_view::FactoryView::from_reply(
+        &serde_json::json!({ "runs": [] }),
+        12,
+    ));
+    assert!(v.route_paste("never"));
+    assert_eq!(editor_text(&v), "");
     // The bare dock: the editor takes it.
     let mut v = view();
     assert!(!v.route_paste("direct"));
