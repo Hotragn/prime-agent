@@ -411,10 +411,20 @@ pub fn find_cut_point(
         .into_iter()
         .rev()
     {
-        let FileEntry::Message { message, .. } = entry else {
-            continue;
+        let tokens = match entry {
+            FileEntry::Message { message, .. } => estimate_tokens(message),
+            // The harness digest is a regenerable snapshot the compaction row
+            // carries itself; it never anchors the kept tail.
+            FileEntry::CustomMessage { payload, .. }
+                if payload.custom_type != super::headless::HARNESS_DIGEST_CUSTOM_TYPE =>
+            {
+                estimate_tokens(&AgentMessage::Custom(
+                    crate::session::create_custom_message(payload, entry),
+                ))
+            }
+            _ => continue,
         };
-        accumulated = accumulated.saturating_add(estimate_tokens(message));
+        accumulated = accumulated.saturating_add(tokens);
         if accumulated >= keep_recent_tokens {
             cut_index = *cut_points.last().unwrap();
             for &point in &cut_points {
@@ -843,6 +853,49 @@ mod tests {
         let keep_small = find_cut_point(&assistant_final, 0, 4, 1);
         assert!(keep_small.is_split_turn);
         assert_eq!(keep_small.turn_start_index, Some(2));
+    }
+
+    /// Custom messages ride the built context (and the threshold estimate), so
+    /// the walk back counts them: a tail of large notices moves the cut forward
+    /// instead of keeping everything since the previous boundary.
+    #[test]
+    fn cut_point_counts_custom_messages_in_the_kept_tail() {
+        let notice = |id: &str, parent: &str| FileEntry::CustomMessage {
+            payload: pa_types::session::CustomMessageEntry {
+                custom_type: "ipython_state".to_string(),
+                content: pa_types::ai::UserContent::Text("x".repeat(80_000)),
+                details: None,
+                display: false,
+                rest: serde_json::Map::default(),
+            },
+            base: EntryBase {
+                id: Some(id.to_string()),
+                parent_id: Some(parent.to_string()),
+                timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
+                rest: serde_json::Map::default(),
+            },
+        };
+        let entries = vec![
+            user_entry("u1", "root", "turn one"),
+            assistant_entry("a1", "u1"),
+            notice("n1", "a1"),
+            user_entry("u2", "n1", "turn two"),
+            assistant_entry("a2", "u2"),
+            notice("n2", "a2"),
+            user_entry("u3", "n2", "turn three"),
+            assistant_entry("a3", "u3"),
+        ];
+        // Each notice estimates at 20k tokens: the walk back reaches the
+        // budget at n2, so the kept tail starts there (a custom message is
+        // its own turn start) and turns one and two are summarized.
+        assert_eq!(
+            find_cut_point(&entries, 0, entries.len(), 20_000),
+            CutPointResult {
+                first_kept_entry_index: 5,
+                turn_start_index: Some(5),
+                is_split_turn: true,
+            }
+        );
     }
 
     #[test]
